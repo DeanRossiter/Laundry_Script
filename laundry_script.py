@@ -1,41 +1,57 @@
+class Plug:
+    def __init__(self, name, api):
+        self.name = name
+        self.api = api
+
 #!/usr/bin/env python3
 import os
-import sys
-import subprocess
-
-# Virtual Environment Setup
-venv_dir = os.path.expanduser("~/laundry-venv")
-if not os.path.exists(os.path.join(venv_dir, "bin", "activate")):
-    print("Creating virtual environment and installing dependencies...")
-    subprocess.check_call([sys.executable, "-m", "venv", venv_dir])
-    subprocess.check_call([
-        os.path.join(venv_dir, "bin", "pip"),
-        "install", "--break-system-packages",
-        "--upgrade", "pip", "tapo", "requests"
-    ])
-
-if sys.prefix != venv_dir:
-    activate_script = os.path.join(venv_dir, "bin", "python")
-    os.execv(activate_script, [activate_script] + sys.argv)
-
-# Imports
 import asyncio
 import requests
 from tapo import ApiClient
+import sys
 
-# Pushover Notification
-def send_notification(message: str):
+# ---- Environment Variables ----
+PUSHOVER_TOKEN = os.environ.get("PUSHOVER_TOKEN", "")
+PUSHOVER_USER  = os.environ.get("PUSHOVER_USER", "")
+
+TAPO_EMAIL    = os.environ.get("TAPO_EMAIL", "")
+TAPO_PASSWORD = os.environ.get("TAPO_PASSWORD", "")
+
+DRYER_IP  = os.environ.get("DRYER_IP", "192.168.1.101")
+WASHER_IP = os.environ.get("WASHER_IP", "192.168.1.102")
+
+def check_environment():
+    if not PUSHOVER_TOKEN or not PUSHOVER_USER:
+        raise RuntimeError("Missing PUSHOVER_TOKEN or PUSHOVER_USER env vars")
+
+    if not TAPO_EMAIL or not TAPO_PASSWORD:
+        raise RuntimeError("Missing TAPO_EMAIL or TAPO_PASSWORD env vars")
+
+# ---- Notifications (quiet unless important) ----
+def pushover_sound(machine):
+    if machine == "washer":
+        return "wm_notification"
+    if machine == "dryer":
+        return "dry_notification"
+    return "echo"
+
+def send_notification(message, machine=None):
     data = {
-        "token": "<insert token here>",
-        "user":  "<insert user string here>",
+        "token": PUSHOVER_TOKEN,
+        "user":  PUSHOVER_USER,
         "message": message,
-        "sound": "echo" 
+        "sound": pushover_sound(machine),
     }
-    response = requests.post("https://api.pushover.net/1/messages.json", data=data)
-    print(f"[NOTIFY] {message} (status {response.status_code})")
+    response = requests.post("https://api.pushover.net/1/messages.json", data=data, timeout=10)
+    if response.status_code != 200:
+        print(f"Couldn't send message:{message} (status {response.status_code})")
 
-# Monitor a single smart plug
-async def monitor_plug(plug, label):
+async def notify(message, machine=None):
+    await asyncio.to_thread(send_notification, message, machine)
+
+# ---- Monitoring ----
+async def monitor_plug(plug):
+    
     armed = False
     high_power_threshold = 100
     high_power_count = 0
@@ -44,56 +60,92 @@ async def monitor_plug(plug, label):
 
     while True:
         try:
-            energy = await plug.get_energy_usage()
-            power = energy.current_power / 1000  # convert mW to W
-            print(f"[{label}] Power: {power:.2f} W")
-
-            if power > high_power_threshold:
-                high_power_count += 1
-                low_power_count = 0
-                if not armed and high_power_count >= 10:
-                    armed = True
-                    print(f"[{label}] Armed (sustained high power)")
-            elif power < low_power_threshold:
-                high_power_count = 0
-                if armed:
-                    low_power_count += 1
-                    if low_power_count >= 30:
-                        send_notification(f"{label} has finished")
-                        print(f"[{label}] Disarmed (sustained low power)")
-                        armed = False
-                        low_power_count = 0
-                else:
-                    low_power_count = 0
-                    high_power_count = 0
-
+            energy = await plug.api.get_current_power()
+            power = energy.current_power # / 1000
+            print(f"[{plug.name}] Power: {power:.2f} W")
         except Exception as e:
-            print(f"[{label}] Error reading power: {e}")
+            print("=== Error Reading Power ===")
+            print(f"Exception: {e}")
+            print(f"Energy: {energy if 'energy' in locals() else 'N/A'}")
+
+        if power > high_power_threshold:
+            high_power_count += 1
+            low_power_count = 0
+            if not armed and high_power_count >= 10:
+                armed = True
+                print(f"{plug.name} Armed (sustained high power)")
+
+        elif power < low_power_threshold:
+            high_power_count = 0
+            if armed:
+                low_power_count += 1
+                if low_power_count >= 60:
+                    await notify(f"{plug.name} has finished", plug.name)
+                    print(f"{plug.name} Disarmed (sustained low power)")
+                    armed = False
+                    low_power_count = 0
+            else:
+                low_power_count = 0
 
         await asyncio.sleep(3)
 
-# Main
+
+async def setup_plugs():
+    
+    print("=== Connect to client ===")
+    client = ApiClient(TAPO_EMAIL, TAPO_PASSWORD)
+
+
+    print("=== Washer Plug ===")
+    try:
+        washer_plug = Plug("washer", await client.p110(WASHER_IP))
+        washer_connected = True
+    except Exception as e:
+        washer_connected = False
+    
+    await asyncio.sleep(3)
+
+    print("=== Dryer Plug ===")
+    try:
+        dryer_plug = Plug("dryer", await client.p110(DRYER_IP))
+        dryer_connected = True
+    except Exception as e:
+        dryer_connected = False
+
+    print("=== Plug Connection Status ===")
+    if not dryer_connected or not washer_connected:
+        print(f"Plug connection issue - Dryer status: {dryer_connected}, Washer status: {washer_connected}")
+        raise RuntimeError("Could not connect to all plugs")
+    print(f"Success - Dryer status: {dryer_connected}, Washer status: {washer_connected}")
+    return dryer_plug, washer_plug
+
+# ---- Main ----
 async def main():
-    email = "<insert email address here>"
-    password = "<insert password address here>"
-    dryer_ip = "<insert static ip address of dryer smart plug here>"
-    washer_ip = "<insert static ip address of washer smart plug here>"
+    print("PYTHON:", sys.executable)
+    print("=== Laundry Monitor Started ===")
+    
+    try:
+        print("=== Check Environment ===")
+        check_environment()    
 
-    client = ApiClient(email, password)
+        print("=== Initial Notification ===")
+        await notify("Laundry monitor power on.")
 
-    dryer_plug = await client.p110(dryer_ip)
-    washer_plug = await client.p110(washer_ip)
+        print("=== Setup Plugs ===")
+        dryer_plug, washer_plug = await setup_plugs()
 
-    await asyncio.gather(
-        monitor_plug(dryer_plug, "Dryer"),
-        monitor_plug(washer_plug, "Washer")
-    )
+        print("=== Running Monitor ===")
+        await asyncio.gather(
+            monitor_plug(dryer_plug),
+            monitor_plug(washer_plug),
+        )
+
+    except Exception as e:
+        try:
+            await notify(f"Laundry monitor crashed: {e}")
+        except Exception as notify_error:
+            print(f"Failed to send crash notification: {notify_error}")
+
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except Exception as e:
-        send_notification(f"Laundry monitor crashed: {e}")
-        raise
-    finally:
-        send_notification("Laundry monitor stopped running.")
+    asyncio.run(main())
