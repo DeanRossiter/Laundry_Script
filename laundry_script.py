@@ -17,8 +17,8 @@ PUSHOVER_USER  = os.environ.get("PUSHOVER_USER", "")
 TAPO_EMAIL    = os.environ.get("TAPO_EMAIL", "")
 TAPO_PASSWORD = os.environ.get("TAPO_PASSWORD", "")
 
-DRYER_IP  = os.environ.get("DRYER_IP", "192.168.1.101")
-WASHER_IP = os.environ.get("WASHER_IP", "192.168.1.102")
+#DRYER_IP  = os.environ.get("DRYER_IP", "192.168.1.102")
+WASHER_IP = os.environ.get("WASHER_IP", "192.168.1.100")
 
 def check_environment():
     if not PUSHOVER_TOKEN or not PUSHOVER_USER:
@@ -31,8 +31,8 @@ def check_environment():
 def pushover_sound(machine):
     if machine == "washer":
         return "wm_notification"
-    if machine == "dryer":
-        return "dry_notification"
+    # if machine == "dryer":
+    #     return "dry_notification"
     return "echo"
 
 def send_notification(message, machine=None):
@@ -102,28 +102,33 @@ async def setup_plugs():
         washer_connected = True
     except Exception as e:
         washer_connected = False
+        print(f"Washer connection error: {e}")
     
     await asyncio.sleep(3)
 
-    print("=== Dryer Plug ===")
-    try:
-        dryer_plug = Plug("dryer", await client.p110(DRYER_IP))
-        dryer_connected = True
-    except Exception as e:
-        dryer_connected = False
+    # print("=== Dryer Plug ===")
+    # try:
+    #     dryer_plug = Plug("dryer", await client.p110(DRYER_IP))
+    #     dryer_connected = True
+    # except Exception as e:
+    #     dryer_connected = False
 
     print("=== Plug Connection Status ===")
-    if not dryer_connected or not washer_connected:
-        print(f"Plug connection issue - Dryer status: {dryer_connected}, Washer status: {washer_connected}")
-        raise RuntimeError("Could not connect to all plugs")
-    print(f"Success - Dryer status: {dryer_connected}, Washer status: {washer_connected}")
-    return dryer_plug, washer_plug
+    if not washer_connected:
+        print(f"Plug connection issue - Washer status: {washer_connected}")
+        raise RuntimeError("Could not connect to washer plug")
+    # if not dryer_connected:
+    #     print(f"Plug connection issue - Dryer status: {dryer_connected}")
+    #     raise RuntimeError("Could not connect to dryer plug")
+    print(f"Success - All Plugs Connected")
+    return washer_plug
+
 
 # ---- Main ----
 async def main():
     print("PYTHON:", sys.executable)
     print("=== Laundry Monitor Started ===")
-    
+
     try:
         print("=== Check Environment ===")
         check_environment()    
@@ -132,11 +137,11 @@ async def main():
         await notify("Laundry monitor power on.")
 
         print("=== Setup Plugs ===")
-        dryer_plug, washer_plug = await setup_plugs()
+        washer_plug = await setup_plugs()
 
-        print("=== Running Monitor ===")
+        print("=== Get Data ===")
         await asyncio.gather(
-            monitor_plug(dryer_plug),
+            # monitor_plug(dryer_plug),
             monitor_plug(washer_plug),
         )
 
